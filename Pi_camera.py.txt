@@ -1,0 +1,223 @@
+import os
+import time
+import subprocess
+from PIL import Image
+import numpy as np
+import colorsys
+
+# -----------------------------
+# SETTINGS
+# -----------------------------
+IMAGE_FILE = "/home/lenishak/image.jpg"
+DEBUG_CROP_FILE = "/home/lenishak/debug_crop.jpg"
+OUTPUT_FILE = "/home/lenishak/assignments.txt"
+
+ALL_COLOURS = ["yellow", "blue", "pink", "black"]
+remaining_colours = ["yellow", "blue", "pink", "black"]
+FIXED_POSITIONS = ["A", "B", "C", "D"]
+
+assignments = {}
+
+# -----------------------------
+# CAMERA
+# -----------------------------
+def take_picture():
+    result = subprocess.run(
+        ["rpicam-jpeg", "-o", IMAGE_FILE, "-t", "1000", "--awb", "auto"],
+        capture_output=True,
+        text=True
+    )
+
+    time.sleep(1)
+
+    if not os.path.isfile(IMAGE_FILE):
+        print("Image was not created.")
+        print(result.stderr)
+        return False
+
+    return True
+
+# -----------------------------
+# COLOUR CLASSIFICATION
+# -----------------------------
+def classify_colour(r, g, b):
+    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+    hue = h * 360
+    sat = s * 100
+    val = v * 100
+
+    if val < 20:
+        return None
+
+    # BLACK
+    if val < 35 and sat < 40:
+        return "black"
+
+    # BLUE
+    if 180 <= hue <= 260 and sat > 35 and val > 25:
+        return "blue"
+
+    # YELLOW
+    if 40 <= hue <= 75 and sat > 35 and val > 40 and r > 120 and g > 120 and b < 140:
+        return "yellow"
+
+    # PINK
+    if (hue >= 300 or hue <= 15) and sat > 25 and val > 45 and r > 150 and b > 100 and g < 170:
+        return "pink"
+
+    return None
+
+# -----------------------------
+# DETECT MAIN COLOUR
+# -----------------------------
+def detect_main_colour():
+    img = Image.open(IMAGE_FILE).convert("RGB")
+    img_np = np.array(img)
+
+    height, width, _ = img_np.shape
+
+    # Centre crop only
+    box_size = 60
+    cx = width // 2
+    cy = height // 2
+
+    x1 = max(cx - box_size // 2, 0)
+    y1 = max(cy - box_size // 2, 0)
+    x2 = min(cx + box_size // 2, width)
+    y2 = min(cy + box_size // 2, height)
+
+    crop = img_np[y1:y2, x1:x2]
+    Image.fromarray(crop).save(DEBUG_CROP_FILE)
+
+    counts = {
+        "yellow": 0,
+        "blue": 0,
+        "pink": 0,
+        "black": 0
+    }
+
+    total_checked = 0
+    r_total = 0
+    g_total = 0
+    b_total = 0
+
+    for row in crop:
+        for pixel in row:
+            r, g, b = pixel
+            r_total += r
+            g_total += g
+            b_total += b
+            total_checked += 1
+
+            colour = classify_colour(r, g, b)
+            if colour:
+                counts[colour] += 1
+
+    avg_r = r_total / total_checked
+    avg_g = g_total / total_checked
+    avg_b = b_total / total_checked
+
+    print("Average centre RGB:", round(avg_r, 1), round(avg_g, 1), round(avg_b, 1))
+    print("Pixel counts:", counts)
+    print("Still looking for:", remaining_colours)
+    print("Debug crop saved to:", DEBUG_CROP_FILE)
+
+    # Only choose colours that are still remaining
+    filtered_counts = {}
+    for colour in remaining_colours:
+        filtered_counts[colour] = counts[colour]
+
+    sorted_counts = sorted(filtered_counts.items(), key=lambda x: x[1], reverse=True)
+    top_colour, top_count = sorted_counts[0]
+
+    if top_count < 20:
+        return None
+
+    if len(sorted_counts) > 1:
+        second_colour, second_count = sorted_counts[1]
+        if top_count < second_count * 1.3:
+            return None
+
+    return top_colour
+
+# -----------------------------
+# ASSIGN POSITION
+# -----------------------------
+def assign_next_position(colour):
+    if colour in assignments:
+        return assignments[colour]
+
+    if len(assignments) >= len(FIXED_POSITIONS):
+        return None
+
+    next_position = FIXED_POSITIONS[len(assignments)]
+    assignments[colour] = next_position
+    return next_position
+
+# -----------------------------
+# SAVE RESULTS
+# -----------------------------
+def save_assignments():
+    with open(OUTPUT_FILE, "w") as f:
+        for colour, position in assignments.items():
+            f.write(f"{colour}:{position}\n")
+
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
+print("Starting colour detection...")
+
+attempt = 1
+max_attempts = 30   # safety stop so it doesn't run forever
+
+while len(remaining_colours) > 0 and attempt <= max_attempts:
+    print("\nAttempt", attempt)
+    print("Remaining colours:", remaining_colours)
+
+    if not take_picture():
+        print("Failed to take picture.")
+        attempt += 1
+        time.sleep(2)
+        continue
+
+    detected = detect_main_colour()
+
+    if detected is None:
+        print("No clear remaining colour detected.")
+        attempt += 1
+        time.sleep(2)
+        continue
+
+    if detected not in remaining_colours:
+        print("That colour was already found:", detected)
+        attempt += 1
+        time.sleep(2)
+        continue
+
+    pos = assign_next_position(detected)
+
+    if pos is None:
+        print("No positions left.")
+        break
+
+    print("Detected:", detected, "-> Assigned to", pos)
+
+    # REMOVE FOUND COLOUR
+    remaining_colours.remove(detected)
+
+    save_assignments()
+
+    print("Removed", detected, "from remaining list.")
+    print("Now still needed:", remaining_colours)
+
+    attempt += 1
+    time.sleep(2)
+
+print("\nFinal assignments:")
+print(assignments)
+print("Saved to", OUTPUT_FILE)
+
+if len(remaining_colours) == 0:
+    print("All colours found.")
+else:
+    print("Stopped before finding all colours.")
